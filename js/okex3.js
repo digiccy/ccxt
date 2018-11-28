@@ -52,7 +52,13 @@ module.exports = class okex3 extends okex {
                         
                     ],
                     'get': [
-                        'account/v3/withdrawal/fee'
+                        'account/v3/withdrawal/fee',
+                        'spot/v3/accounts',
+                        'spot/v3/accounts/{symbol}',
+                        'account/v3/wallet',
+                        'account/v3/wallet/{symbol}',
+                        'account/v3/withdrawal/history/{symbol}',
+                        'account/v3/deposit/history/{symbol}'
                     ]
                 }
             },

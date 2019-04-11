@@ -69,7 +69,7 @@ module.exports = class crypton extends Exchange {
         });
     }
 
-    async fetchMarkets () {
+    async fetchMarkets (params = {}) {
         let response = await this.publicGetMarkets ();
         let markets = response['result'];
         let result = [];
@@ -177,7 +177,8 @@ module.exports = class crypton extends Exchange {
 
     async fetchTickers (symbols = undefined, params = {}) {
         await this.loadMarkets ();
-        let tickers = await this.publicGetTickers (params);
+        let response = await this.publicGetTickers (params);
+        let tickers = response['result'];
         let keys = Object.keys (tickers);
         let result = {};
         for (let i = 0; i < keys.length; i++) {
@@ -399,9 +400,8 @@ module.exports = class crypton extends Exchange {
         return { 'url': url, 'method': method, 'body': body, 'headers': headers };
     }
 
-    handleErrors (code, reason, url, method, headers, body) {
+    handleErrors (code, reason, url, method, headers, body, response) {
         if (body[0] === '{') {
-            let response = JSON.parse (body);
             let success = this.safeValue (response, 'success');
             if (!success) {
                 throw new ExchangeError (this.id + ' ' + body);

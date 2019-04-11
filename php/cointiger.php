@@ -96,8 +96,8 @@ class cointiger extends huobipro {
                 'trading' => array (
                     'tierBased' => false,
                     'percentage' => true,
-                    'maker' => 0.001,
-                    'taker' => 0.001,
+                    'maker' => 0.0008,
+                    'taker' => 0.0015,
                 ),
             ),
             'exceptions' => array (
@@ -113,6 +113,7 @@ class cointiger extends huobipro {
                 '100002' => '\\ccxt\\ExchangeNotAvailable',
                 '100003' => '\\ccxt\\ExchangeError',
                 '100005' => '\\ccxt\\AuthenticationError',
+                '110030' => '\\ccxt\\DDoSProtection',
             ),
             'commonCurrencies' => array (
                 'FGC' => 'FoundGameCoin',
@@ -121,7 +122,7 @@ class cointiger extends huobipro {
         ));
     }
 
-    public function fetch_markets () {
+    public function fetch_markets ($params = array ()) {
         $response = $this->v2publicGetCurrencys ();
         //
         //     {
@@ -403,6 +404,17 @@ class cointiger extends huobipro {
             'limit' => $limit,
         ), $params));
         return $this->parse_trades($response['data']['list'], $market, $since, $limit);
+    }
+
+    public function parse_ohlcv ($ohlcv, $market = null, $timeframe = '1m', $since = null, $limit = null) {
+        return [
+            $ohlcv['id'] * 1000,
+            $ohlcv['open'],
+            $ohlcv['high'],
+            $ohlcv['low'],
+            $ohlcv['close'],
+            $ohlcv['vol'],
+        ];
     }
 
     public function fetch_ohlcv ($symbol, $timeframe = '1m', $since = null, $limit = 1000, $params = array ()) {
@@ -729,9 +741,14 @@ class cointiger extends huobipro {
 
     public function create_order ($symbol, $type, $side, $amount, $price = null, $params = array ()) {
         $this->load_markets();
-        if (!$this->password) {
-            throw new AuthenticationError ($this->id . ' createOrder requires exchange.password to be set to user trading password (not login password!)');
-        }
+        //
+        // obsolete since v2
+        // https://github.com/ccxt/ccxt/issues/4815
+        //
+        //     if (!$this->password) {
+        //         throw new AuthenticationError ($this->id . ' createOrder requires exchange.password to be set to user trading password (not login password!)');
+        //     }
+        //
         $this->check_required_credentials();
         $market = $this->market ($symbol);
         $orderType = ($type === 'limit') ? 1 : 2;
@@ -740,7 +757,7 @@ class cointiger extends huobipro {
             'side' => strtoupper ($side),
             'type' => $orderType,
             'volume' => $this->amount_to_precision($symbol, $amount),
-            'capital_password' => $this->password,
+            // 'capital_password' => $this->password, // obsolete since v2, https://github.com/ccxt/ccxt/issues/4815
         );
         if (($type === 'market') && ($side === 'buy')) {
             if ($price === null) {
@@ -757,14 +774,20 @@ class cointiger extends huobipro {
                 $order['price'] = $this->price_to_precision($symbol, $price);
             }
         }
-        $response = $this->privatePostOrder (array_merge ($order, $params));
+        $response = $this->v2PostOrder (array_merge ($order, $params));
         //
-        //     array ( "order_id":34343 )
+        //     {
+        //         "code" => "0",
+        //         "msg" => "suc",
+        //         "data" => {
+        //             "order_id" => 481
+        //         }
+        //     }
         //
         $timestamp = $this->milliseconds ();
         return array (
             'info' => $response,
-            'id' => (string) $response['data']['order_id'],
+            'id' => $this->safe_string($response['data'], 'order_id'),
             'timestamp' => $timestamp,
             'datetime' => $this->iso8601 ($timestamp),
             'lastTradeTimestamp' => null,
@@ -856,13 +879,12 @@ class cointiger extends huobipro {
         return array ( 'url' => $url, 'method' => $method, 'body' => $body, 'headers' => $headers );
     }
 
-    public function handle_errors ($httpCode, $reason, $url, $method, $headers, $body) {
+    public function handle_errors ($httpCode, $reason, $url, $method, $headers, $body, $response) {
         if (gettype ($body) !== 'string')
             return; // fallback to default error handler
         if (strlen ($body) < 2)
             return; // fallback to default error handler
         if (($body[0] === '{') || ($body[0] === '[')) {
-            $response = json_decode ($body, $as_associative_array = true);
             if (is_array ($response) && array_key_exists ('code', $response)) {
                 //
                 //     array ( "$code" => "100005", "msg" => "request sign illegal", "data" => null )
@@ -887,6 +909,8 @@ class cointiger extends huobipro {
                                     throw new ExchangeError ($feedback);
                                 } else if ($message === 'api_keyNot EXIST') {
                                     throw new AuthenticationError ($feedback);
+                                } else if ($message === 'price precision exceed the limit') {
+                                    throw new InvalidOrder ($feedback);
                                 } else if ($message === 'Parameter error') {
                                     throw new BadRequest ($feedback);
                                 }

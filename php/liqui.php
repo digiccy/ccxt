@@ -79,19 +79,34 @@ class liqui extends Exchange {
                 'DSH' => 'DASH',
             ),
             'exceptions' => array (
-                '803' => '\\ccxt\\InvalidOrder', // "Count could not be less than 0.001." (selling below minAmount)
-                '804' => '\\ccxt\\InvalidOrder', // "Count could not be more than 10000." (buying above maxAmount)
-                '805' => '\\ccxt\\InvalidOrder', // "price could not be less than X." (minPrice violation on buy & sell)
-                '806' => '\\ccxt\\InvalidOrder', // "price could not be more than X." (maxPrice violation on buy & sell)
-                '807' => '\\ccxt\\InvalidOrder', // "cost could not be less than X." (minCost violation on buy & sell)
-                '831' => '\\ccxt\\InsufficientFunds', // "Not enougth X to create buy order." (buying with balance.quote < order.cost)
-                '832' => '\\ccxt\\InsufficientFunds', // "Not enougth X to create sell order." (selling with balance.base < order.amount)
-                '833' => '\\ccxt\\OrderNotFound', // "Order with id X was not found." (cancelling non-existent, closed and cancelled order)
+                'exact' => array (
+                    '803' => '\\ccxt\\InvalidOrder', // "Count could not be less than 0.001." (selling below minAmount)
+                    '804' => '\\ccxt\\InvalidOrder', // "Count could not be more than 10000." (buying above maxAmount)
+                    '805' => '\\ccxt\\InvalidOrder', // "price could not be less than X." (minPrice violation on buy & sell)
+                    '806' => '\\ccxt\\InvalidOrder', // "price could not be more than X." (maxPrice violation on buy & sell)
+                    '807' => '\\ccxt\\InvalidOrder', // "cost could not be less than X." (minCost violation on buy & sell)
+                    '831' => '\\ccxt\\InsufficientFunds', // "Not enougth X to create buy order." (buying with balance.quote < order.cost)
+                    '832' => '\\ccxt\\InsufficientFunds', // "Not enougth X to create sell order." (selling with balance.base < order.amount)
+                    '833' => '\\ccxt\\OrderNotFound', // "Order with id X was not found." (cancelling non-existent, closed and cancelled order)
+                ),
+                'broad' => array (
+                    'Invalid pair name' => '\\ccxt\\ExchangeError', // array ("success":0,"error":"Invalid pair name => btc_eth")
+                    'invalid api key' => '\\ccxt\\AuthenticationError',
+                    'invalid sign' => '\\ccxt\\AuthenticationError',
+                    'api key dont have trade permission' => '\\ccxt\\AuthenticationError',
+                    'invalid parameter' => '\\ccxt\\InvalidOrder',
+                    'invalid order' => '\\ccxt\\InvalidOrder',
+                    'Requests too often' => '\\ccxt\\DDoSProtection',
+                    'not available' => '\\ccxt\\ExchangeNotAvailable',
+                    'data unavailable' => '\\ccxt\\ExchangeNotAvailable',
+                    'external service unavailable' => '\\ccxt\\ExchangeNotAvailable',
+                ),
             ),
             'options' => array (
                 'fetchOrderMethod' => 'privatePostOrderInfo',
                 'fetchMyTradesMethod' => 'privatePostTradeHistory',
                 'cancelOrderMethod' => 'privatePostCancelOrder',
+                'fetchTickersMaxLength' => 2048,
             ),
         ));
     }
@@ -114,7 +129,7 @@ class liqui extends Exchange {
         );
     }
 
-    public function fetch_markets () {
+    public function fetch_markets ($params = array ()) {
         $response = $this->publicGetInfo ();
         $markets = $response['pairs'];
         $keys = is_array ($markets) ? array_keys ($markets) : array ();
@@ -287,13 +302,14 @@ class liqui extends Exchange {
 
     public function fetch_tickers ($symbols = null, $params = array ()) {
         $this->load_markets();
-        $ids = null;
+        $ids = $this->ids;
         if ($symbols === null) {
-            $ids = implode ('-', $this->ids);
-            // max URL length is 2083 $symbols, including http schema, hostname, tld, etc...
-            if (strlen ($ids) > 2048) {
-                $numIds = is_array ($this->ids) ? count ($this->ids) : 0;
-                throw new ExchangeError ($this->id . ' has ' . (string) $numIds . ' $symbols exceeding max URL length, you are required to specify a list of $symbols in the first argument to fetchTickers');
+            $numIds = is_array ($ids) ? count ($ids) : 0;
+            $ids = implode ('-', $ids);
+            $maxLength = $this->safe_integer($this->options, 'fetchTickersMaxLength', 2048);
+            // max URL length is 2048 $symbols, including http schema, hostname, tld, etc...
+            if (strlen ($ids) > $this->options['fetchTickersMaxLength']) {
+                throw new ArgumentsRequired ($this->id . ' has ' . (string) $numIds . ' markets exceeding max URL length for this endpoint (' . (string) $maxLength . ' characters), please, specify a list of $symbols of interest in the first argument to fetchTickers');
             }
         } else {
             $ids = $this->market_ids($symbols);
@@ -673,14 +689,20 @@ class liqui extends Exchange {
         return $this->parse_trades($trades, $market, $since, $limit);
     }
 
-    public function withdraw ($currency, $amount, $address, $tag = null, $params = array ()) {
+    public function withdraw ($code, $amount, $address, $tag = null, $params = array ()) {
         $this->check_address($address);
         $this->load_markets();
-        $response = $this->privatePostWithdrawCoin (array_merge (array (
-            'coinName' => $currency,
+        $currency = $this->currency ($code);
+        $request = array (
+            'coinName' => $currency['id'],
             'amount' => floatval ($amount),
             'address' => $address,
-        ), $params));
+        );
+        // no docs on the $tag, yet...
+        if ($tag !== null) {
+            throw new ExchangeError ($this->id . ' withdraw() does not support the $tag argument yet due to a lack of docs on withdrawing with tag/memo on behalf of the exchange.');
+        }
+        $response = $this->privatePostWithdrawCoin (array_merge ($request, $params));
         return array (
             'info' => $response,
             'id' => $response['return']['tId'],
@@ -739,79 +761,59 @@ class liqui extends Exchange {
         return array ( 'url' => $url, 'method' => $method, 'body' => $body, 'headers' => $headers );
     }
 
-    public function handle_errors ($httpCode, $reason, $url, $method, $headers, $body) {
-        if (gettype ($body) !== 'string')
+    public function handle_errors ($httpCode, $reason, $url, $method, $headers, $body, $response) {
+        if (!$this->is_json_encoded_object($body))
             return; // fallback to default error handler
-        if (strlen ($body) < 2)
-            return; // fallback to default error handler
-        if (($body[0] === '{') || ($body[0] === '[')) {
-            $response = json_decode ($body, $as_associative_array = true);
-            if (is_array ($response) && array_key_exists ('success', $response)) {
-                //
-                // 1 - Liqui only returns the integer 'success' key from their private API
-                //
-                //     array ( "$success" => 1, ... ) $httpCode === 200
-                //     array ( "$success" => 0, ... ) $httpCode === 200
-                //
-                // 2 - However, exchanges derived from Liqui, can return non-integers
-                //
-                //     It can be a numeric string
-                //     array ( "sucesss" => "1", ... )
-                //     array ( "sucesss" => "0", ... ), $httpCode >= 200 (can be 403, 502, etc)
-                //
-                //     Or just a string
-                //     array ( "$success" => "true", ... )
-                //     array ( "$success" => "false", ... ), $httpCode >= 200
-                //
-                //     Or a boolean
-                //     array ( "$success" => true, ... )
-                //     array ( "$success" => false, ... ), $httpCode >= 200
-                //
-                // 3 - Oversimplified, Python PEP8 forbids comparison operator (===) of different types
-                //
-                // 4 - We do not want to copy-paste and duplicate the $code of this handler to other exchanges derived from Liqui
-                //
-                // To cover points 1, 2, 3 and 4 combined this handler should work like this:
-                //
-                $success = $this->safe_value($response, 'success', false);
-                if (gettype ($success) === 'string') {
-                    if (($success === 'true') || ($success === '1'))
-                        $success = true;
-                    else
-                        $success = false;
+        if (is_array ($response) && array_key_exists ('success', $response)) {
+            //
+            // 1 - Liqui only returns the integer 'success' key from their private API
+            //
+            //     array ( "$success" => 1, ... ) $httpCode === 200
+            //     array ( "$success" => 0, ... ) $httpCode === 200
+            //
+            // 2 - However, exchanges derived from Liqui, can return non-integers
+            //
+            //     It can be a numeric string
+            //     array ( "sucesss" => "1", ... )
+            //     array ( "sucesss" => "0", ... ), $httpCode >= 200 (can be 403, 502, etc)
+            //
+            //     Or just a string
+            //     array ( "$success" => "true", ... )
+            //     array ( "$success" => "false", ... ), $httpCode >= 200
+            //
+            //     Or a boolean
+            //     array ( "$success" => true, ... )
+            //     array ( "$success" => false, ... ), $httpCode >= 200
+            //
+            // 3 - Oversimplified, Python PEP8 forbids comparison operator (===) of different types
+            //
+            // 4 - We do not want to copy-paste and duplicate the $code of this handler to other exchanges derived from Liqui
+            //
+            // To cover points 1, 2, 3 and 4 combined this handler should work like this:
+            //
+            $success = $this->safe_value($response, 'success', false);
+            if (gettype ($success) === 'string') {
+                if (($success === 'true') || ($success === '1'))
+                    $success = true;
+                else
+                    $success = false;
+            }
+            if (!$success) {
+                $code = $this->safe_string($response, 'code');
+                $message = $this->safe_string($response, 'error');
+                $feedback = $this->id . ' ' . $this->json ($response);
+                $exact = $this->exceptions['exact'];
+                if (is_array ($exact) && array_key_exists ($code, $exact)) {
+                    throw new $exact[$code] ($feedback);
+                } else if (is_array ($exact) && array_key_exists ($message, $exact)) {
+                    throw new $exact[$message] ($feedback);
                 }
-                if (!$success) {
-                    $code = $this->safe_string($response, 'code');
-                    $message = $this->safe_string($response, 'error');
-                    $feedback = $this->id . ' ' . $this->json ($response);
-                    $exceptions = $this->exceptions;
-                    if (is_array ($exceptions) && array_key_exists ($code, $exceptions)) {
-                        throw new $exceptions[$code] ($feedback);
-                    }
-                    // need a second error map for these messages, apparently...
-                    // in fact, we can use the same .exceptions with string-keys to save some loc here
-                    if ($message === 'invalid api key') {
-                        throw new AuthenticationError ($feedback);
-                    } else if ($message === 'invalid sign') {
-                        throw new AuthenticationError ($feedback);
-                    } else if ($message === 'api key dont have trade permission') {
-                        throw new AuthenticationError ($feedback);
-                    } else if (mb_strpos ($message, 'invalid parameter') !== false) { // errorCode 0, returned on buy(symbol, 0, 0)
-                        throw new InvalidOrder ($feedback);
-                    } else if ($message === 'invalid order') {
-                        throw new InvalidOrder ($feedback);
-                    } else if ($message === 'Requests too often') {
-                        throw new DDoSProtection ($feedback);
-                    } else if ($message === 'not available') {
-                        throw new ExchangeNotAvailable ($feedback);
-                    } else if ($message === 'data unavailable') {
-                        throw new ExchangeNotAvailable ($feedback);
-                    } else if ($message === 'external service unavailable') {
-                        throw new ExchangeNotAvailable ($feedback);
-                    } else {
-                        throw new ExchangeError ($feedback);
-                    }
+                $broad = $this->exceptions['broad'];
+                $broadKey = $this->findBroadlyMatchedKey ($broad, $message);
+                if ($broadKey !== null) {
+                    throw new $broad[$broadKey] ($feedback);
                 }
+                throw new ExchangeError ($feedback); // unknown $message
             }
         }
     }

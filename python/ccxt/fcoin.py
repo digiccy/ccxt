@@ -14,7 +14,6 @@ except NameError:
 import base64
 import hashlib
 import math
-import json
 from ccxt.base.errors import ExchangeError
 from ccxt.base.errors import AuthenticationError
 from ccxt.base.errors import InsufficientFunds
@@ -37,11 +36,11 @@ class fcoin (Exchange):
             'version': 'v2',
             'accounts': None,
             'accountsById': None,
-            'hostname': 'api.fcoin.com',
+            'hostname': 'fcoin.com',
             'has': {
                 'CORS': False,
                 'fetchDepositAddress': False,
-                'fetchOHCLV': False,
+                'fetchOHLCV': True,
                 'fetchOpenOrders': True,
                 'fetchClosedOrders': True,
                 'fetchOrder': True,
@@ -65,11 +64,11 @@ class fcoin (Exchange):
             },
             'urls': {
                 'logo': 'https://user-images.githubusercontent.com/1294454/42244210-c8c42e1e-7f1c-11e8-8710-a5fb63b165c4.jpg',
-                'api': 'https://api.fcoin.com',
+                'api': 'https://api.{hostname}',
                 'www': 'https://www.fcoin.com',
                 'referral': 'https://www.fcoin.com/i/Z5P7V',
                 'doc': 'https://developer.fcoin.com',
-                'fees': 'https://support.fcoin.com/hc/en-us/articles/360003715514-Trading-Rules',
+                'fees': 'https://fcoinjp.zendesk.com/hc/en-us/articles/360018727371',
             },
             'api': {
                 'market': {
@@ -146,7 +145,7 @@ class fcoin (Exchange):
             },
         })
 
-    def fetch_markets(self):
+    def fetch_markets(self, params={}):
         response = self.publicGetSymbols()
         result = []
         markets = response['data']
@@ -170,6 +169,7 @@ class fcoin (Exchange):
                     'max': math.pow(10, precision['price']),
                 },
             }
+            active = self.safe_value(market, 'tradable', False)
             if symbol in self.options['limits']:
                 limits = self.extend(self.options['limits'][symbol], limits)
             result.append({
@@ -179,7 +179,7 @@ class fcoin (Exchange):
                 'quote': quote,
                 'baseId': baseId,
                 'quoteId': quoteId,
-                'active': True,
+                'active': active,
                 'precision': precision,
                 'limits': limits,
                 'info': market,
@@ -216,8 +216,8 @@ class fcoin (Exchange):
             priceField = self.sum(index, priceKey)
             amountField = self.sum(index, amountKey)
             result.append([
-                orders[priceField],
-                orders[amountField],
+                self.safe_float(orders, priceField),
+                self.safe_float(orders, amountField),
             ])
         return result
 
@@ -482,7 +482,10 @@ class fcoin (Exchange):
         request += '' if (api == 'private') else (api + '/')
         request += self.implode_params(path, params)
         query = self.omit(params, self.extract_params(path))
-        url = self.urls['api'] + request
+        url = self.implode_params(self.urls['api'], {
+            'hostname': self.hostname,
+        })
+        url += request
         if (api == 'public') or (api == 'market'):
             if query:
                 url += '?' + self.urlencode(query)
@@ -510,13 +513,12 @@ class fcoin (Exchange):
             }
         return {'url': url, 'method': method, 'body': body, 'headers': headers}
 
-    def handle_errors(self, code, reason, url, method, headers, body):
+    def handle_errors(self, code, reason, url, method, headers, body, response):
         if not isinstance(body, basestring):
             return  # fallback to default error handler
         if len(body) < 2:
             return  # fallback to default error handler
         if (body[0] == '{') or (body[0] == '['):
-            response = json.loads(body)
             status = self.safe_string(response, 'status')
             if status != '0':
                 feedback = self.id + ' ' + body

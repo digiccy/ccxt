@@ -26,12 +26,16 @@ class okex (okcoinusd):
                     'private': 'https://www.okex.com/api',
                 },
                 'www': 'https://www.okex.com',
-                'doc': 'https://github.com/okcoin-okex/API-docs-OKEx.com',
+                'doc': [
+                    'https://github.com/okcoin-okex/API-docs-OKEx.com',
+                    'https://www.okex.com/docs/en/',
+                ],
                 'fees': 'https://www.okex.com/pages/products/fees.html',
             },
             'commonCurrencies': {
                 'FAIR': 'FairGame',
                 'HOT': 'Hydro Protocol',
+                'HSR': 'HC',
                 'MAG': 'Maggie',
                 'YOYO': 'YOYOW',
             },
@@ -56,18 +60,18 @@ class okex (okcoinusd):
             'cost': float(self.fee_to_precision(symbol, cost)),
         }
 
-    def fetch_markets(self):
-        markets = super(okex, self).fetch_markets()
+    def fetch_markets(self, params={}):
+        markets = super(okex, self).fetch_markets(params)
         # TODO: they have a new fee schedule as of Feb 7
         # the new fees are progressive and depend on 30-day traded volume
         # the following is the worst case
         for i in range(0, len(markets)):
             if markets[i]['spot']:
-                markets[i]['maker'] = 0.0015
-                markets[i]['taker'] = 0.0020
+                markets[i]['maker'] = 0.0010
+                markets[i]['taker'] = 0.0015
             else:
-                markets[i]['maker'] = 0.0003
-                markets[i]['taker'] = 0.0005
+                markets[i]['maker'] = 0.0002
+                markets[i]['taker'] = 0.0003
         return markets
 
     def fetch_tickers_from_api(self, symbols=None, params={}):

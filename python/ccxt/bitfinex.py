@@ -7,9 +7,9 @@ from ccxt.base.exchange import Exchange
 import base64
 import hashlib
 import math
-import json
 from ccxt.base.errors import ExchangeError
 from ccxt.base.errors import AuthenticationError
+from ccxt.base.errors import PermissionDenied
 from ccxt.base.errors import ArgumentsRequired
 from ccxt.base.errors import InsufficientFunds
 from ccxt.base.errors import InvalidOrder
@@ -34,10 +34,12 @@ class bitfinex (Exchange):
             # new metainfo interface
             'has': {
                 'CORS': False,
+                'cancelAllOrders': True,
                 'createDepositAddress': True,
                 'deposit': True,
                 'fetchClosedOrders': True,
                 'fetchDepositAddress': True,
+                'fetchTradingFee': True,
                 'fetchTradingFees': True,
                 'fetchFundingFees': True,
                 'fetchMyTrades': True,
@@ -69,7 +71,7 @@ class bitfinex (Exchange):
                 'api': 'https://api.bitfinex.com',
                 'www': 'https://www.bitfinex.com',
                 'doc': [
-                    'https://bitfinex.readme.io/v1/docs',
+                    'https://docs.bitfinex.com/v1/docs',
                     'https://github.com/bitfinexcom/bitfinex-api-node',
                 ],
             },
@@ -218,6 +220,7 @@ class bitfinex (Exchange):
                         'AID': 8.08,
                         'MNA': 16.617,
                         'NEC': 1.6504,
+                        'XTZ': 0.2,
                     },
                     'withdraw': {
                         'BTC': 0.0004,
@@ -259,6 +262,7 @@ class bitfinex (Exchange):
                         'AID': 8.08,
                         'MNA': 16.617,
                         'NEC': 1.6504,
+                        'XTZ': 0.2,
                     },
                 },
             },
@@ -266,8 +270,7 @@ class bitfinex (Exchange):
                 'ABS': 'ABYSS',
                 'AIO': 'AION',
                 'ATM': 'ATMI',
-                'BCC': 'CST_BCC',
-                'BCU': 'CST_BCU',
+                'BAB': 'BCH',
                 'CTX': 'CTXC',
                 'DAD': 'DADI',
                 'DAT': 'DATA',
@@ -288,7 +291,7 @@ class bitfinex (Exchange):
                 'SPK': 'SPANK',
                 'STJ': 'STORJ',
                 'YYW': 'YOYOW',
-                'USD': 'USDT',
+                'UST': 'USDT',
                 'UTN': 'UTNP',
             },
             'exceptions': {
@@ -298,7 +301,6 @@ class bitfinex (Exchange):
                     'No such order found.': OrderNotFound,  # ?
                     'Order price must be positive.': InvalidOrder,  # on price <= 0
                     'Could not find a key matching the given X-BFX-APIKEY.': AuthenticationError,
-                    'This API key does not have permission for self action': AuthenticationError,  # authenticated but not authorized
                     'Key price should be a decimal number, e.g. "123.456"': InvalidOrder,  # on isNaN(price)
                     'Key amount should be a decimal number, e.g. "123.456"': InvalidOrder,  # on isNaN(amount)
                     'ERR_RATE_LIMIT': DDoSProtection,
@@ -308,6 +310,7 @@ class bitfinex (Exchange):
                     'Cannot evaluate your available balance, please try again': ExchangeNotAvailable,
                 },
                 'broad': {
+                    'This API key does not have permission': PermissionDenied,  # authenticated but not authorized
                     'Invalid order: not enough exchange balance for ': InsufficientFunds,  # when buying cost is greater than the available quote currency
                     'Invalid order: minimum size for ': InvalidOrder,  # when amount below limits.amount.min
                     'Invalid order': InvalidOrder,  # ?
@@ -381,6 +384,11 @@ class bitfinex (Exchange):
                     'YOYOW': 'yoyow',
                     'ZEC': 'zcash',
                     'ZRX': 'zrx',
+                    'XTZ': 'tezos',
+                },
+                'orderTypes': {
+                    'limit': 'exchange limit',
+                    'market': 'exchange market',
                 },
             },
         })
@@ -407,13 +415,35 @@ class bitfinex (Exchange):
     def fetch_trading_fees(self, params={}):
         self.load_markets()
         response = self.privatePostSummary(params)
+        #
+        #     {
+        #         time: '2019-02-20T15:50:19.152000Z',
+        #         trade_vol_30d: [
+        #             {
+        #                 curr: 'Total(USD)',
+        #                 vol: 0,
+        #                 vol_maker: 0,
+        #                 vol_BFX: 0,
+        #                 vol_BFX_maker: 0,
+        #                 vol_ETHFX: 0,
+        #                 vol_ETHFX_maker: 0
+        #             }
+        #         ],
+        #         fees_funding_30d: {},
+        #         fees_funding_total_30d: 0,
+        #         fees_trading_30d: {},
+        #         fees_trading_total_30d: 0,
+        #         maker_fee: 0.001,
+        #         taker_fee: 0.002
+        #     }
+        #
         return {
             'info': response,
             'maker': self.safe_float(response, 'maker_fee'),
             'taker': self.safe_float(response, 'taker_fee'),
         }
 
-    def fetch_markets(self):
+    def fetch_markets(self, params={}):
         markets = self.publicGetSymbolsDetails()
         result = []
         for p in range(0, len(markets)):
@@ -507,10 +537,9 @@ class bitfinex (Exchange):
         tickers = self.publicGetTickers(params)
         result = {}
         for i in range(0, len(tickers)):
-            ticker = tickers[i]
-            parsedTicker = self.parse_ticker(ticker)
-            symbol = parsedTicker['symbol']
-            result[symbol] = parsedTicker
+            ticker = self.parse_ticker(tickers[i])
+            symbol = ticker['symbol']
+            result[symbol] = ticker
         return result
 
     def fetch_ticker(self, symbol, params={}):
@@ -621,15 +650,11 @@ class bitfinex (Exchange):
 
     def create_order(self, symbol, type, side, amount, price=None, params={}):
         self.load_markets()
-        orderType = type
-        if (type == 'limit') or (type == 'market'):
-            orderType = 'exchange ' + type
-        amount = self.amount_to_precision(symbol, amount)
         order = {
             'symbol': self.market_id(symbol),
-            'amount': amount,
             'side': side,
-            'type': orderType,
+            'amount': self.amount_to_precision(symbol, amount),
+            'type': self.safe_string(self.options['orderTypes'], type, type),
             'ocoorder': False,
             'buy_price_oco': 0,
             'sell_price_oco': 0,
@@ -641,9 +666,30 @@ class bitfinex (Exchange):
         result = self.privatePostOrderNew(self.extend(order, params))
         return self.parse_order(result)
 
+    def edit_order(self, id, symbol, type, side, amount=None, price=None, params={}):
+        self.load_markets()
+        order = {
+            'order_id': id,
+        }
+        if price is not None:
+            order['price'] = self.price_to_precision(symbol, price)
+        if amount is not None:
+            order['amount'] = self.amount_to_precision(symbol, amount)
+        if symbol is not None:
+            order['symbol'] = self.market_id(symbol)
+        if side is not None:
+            order['side'] = side
+        if type is not None:
+            order['type'] = self.safe_string(self.options['orderTypes'], type, type)
+        result = self.privatePostOrderCancelReplace(self.extend(order, params))
+        return self.parse_order(result)
+
     def cancel_order(self, id, symbol=None, params={}):
         self.load_markets()
         return self.privatePostOrderCancel({'order_id': int(id)})
+
+    def cancel_all_orders(self, symbol=None, params={}):
+        return self.privatePostOrderCancelAll(params)
 
     def parse_order(self, order, market=None):
         side = order['side']
@@ -745,25 +791,26 @@ class bitfinex (Exchange):
         response = self.v2GetCandlesTradeTimeframeSymbolHist(self.extend(request, params))
         return self.parse_ohlcvs(response, market, timeframe, since, limit)
 
-    def get_currency_name(self, currency):
-        if currency in self.options['currencyNames']:
-            return self.options['currencyNames'][currency]
-        raise NotSupported(self.id + ' ' + currency + ' not supported for withdrawal')
+    def get_currency_name(self, code):
+        if code in self.options['currencyNames']:
+            return self.options['currencyNames'][code]
+        raise NotSupported(self.id + ' ' + code + ' not supported for withdrawal')
 
-    def create_deposit_address(self, currency, params={}):
-        response = self.fetch_deposit_address(currency, self.extend({
+    def create_deposit_address(self, code, params={}):
+        response = self.fetch_deposit_address(code, self.extend({
             'renew': 1,
         }, params))
         address = self.safe_string(response, 'address')
         self.check_address(address)
         return {
-            'currency': currency,
-            'address': address,
             'info': response['info'],
+            'currency': code,
+            'address': address,
+            'tag': None,
         }
 
-    def fetch_deposit_address(self, currency, params={}):
-        name = self.get_currency_name(currency)
+    def fetch_deposit_address(self, code, params={}):
+        name = self.get_currency_name(code)
         request = {
             'method': name,
             'wallet_name': 'exchange',
@@ -777,7 +824,7 @@ class bitfinex (Exchange):
             address = response['address_pool']
         self.check_address(address)
         return {
-            'currency': currency,
+            'currency': code,
             'address': address,
             'tag': tag,
             'info': response,
@@ -865,9 +912,9 @@ class bitfinex (Exchange):
         }
         return statuses[status] if (status in list(statuses.keys())) else status
 
-    def withdraw(self, currency, amount, address, tag=None, params={}):
+    def withdraw(self, code, amount, address, tag=None, params={}):
         self.check_address(address)
-        name = self.get_currency_name(currency)
+        name = self.get_currency_name(code)
         request = {
             'withdraw_type': name,
             'walletselected': 'exchange',
@@ -914,8 +961,8 @@ class bitfinex (Exchange):
                 'nonce': str(nonce),
                 'request': request,
             }, query)
-            query = self.json(query)
-            query = self.encode(query)
+            body = self.json(query)
+            query = self.encode(body)
             payload = base64.b64encode(query)
             secret = self.encode(self.secret)
             signature = self.hmac(payload, secret, hashlib.sha384)
@@ -926,12 +973,11 @@ class bitfinex (Exchange):
             }
         return {'url': url, 'method': method, 'body': body, 'headers': headers}
 
-    def handle_errors(self, code, reason, url, method, headers, body):
+    def handle_errors(self, code, reason, url, method, headers, body, response):
         if len(body) < 2:
             return
         if code >= 400:
             if body[0] == '{':
-                response = json.loads(body)
                 feedback = self.id + ' ' + self.json(response)
                 message = None
                 if 'message' in response:

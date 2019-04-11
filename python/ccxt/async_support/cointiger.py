@@ -13,7 +13,6 @@ except NameError:
     basestring = str  # Python 2
 import hashlib
 import math
-import json
 from ccxt.base.errors import ExchangeError
 from ccxt.base.errors import AuthenticationError
 from ccxt.base.errors import ArgumentsRequired
@@ -21,6 +20,7 @@ from ccxt.base.errors import BadRequest
 from ccxt.base.errors import InsufficientFunds
 from ccxt.base.errors import InvalidOrder
 from ccxt.base.errors import OrderNotFound
+from ccxt.base.errors import DDoSProtection
 from ccxt.base.errors import ExchangeNotAvailable
 
 
@@ -113,8 +113,8 @@ class cointiger (huobipro):
                 'trading': {
                     'tierBased': False,
                     'percentage': True,
-                    'maker': 0.001,
-                    'taker': 0.001,
+                    'maker': 0.0008,
+                    'taker': 0.0015,
                 },
             },
             'exceptions': {
@@ -130,6 +130,7 @@ class cointiger (huobipro):
                 '100002': ExchangeNotAvailable,
                 '100003': ExchangeError,
                 '100005': AuthenticationError,
+                '110030': DDoSProtection,
             },
             'commonCurrencies': {
                 'FGC': 'FoundGameCoin',
@@ -137,7 +138,7 @@ class cointiger (huobipro):
             },
         })
 
-    async def fetch_markets(self):
+    async def fetch_markets(self, params={}):
         response = await self.v2publicGetCurrencys()
         #
         #     {
@@ -401,6 +402,16 @@ class cointiger (huobipro):
             'limit': limit,
         }, params))
         return self.parse_trades(response['data']['list'], market, since, limit)
+
+    def parse_ohlcv(self, ohlcv, market=None, timeframe='1m', since=None, limit=None):
+        return [
+            ohlcv['id'] * 1000,
+            ohlcv['open'],
+            ohlcv['high'],
+            ohlcv['low'],
+            ohlcv['close'],
+            ohlcv['vol'],
+        ]
 
     async def fetch_ohlcv(self, symbol, timeframe='1m', since=None, limit=1000, params={}):
         await self.load_markets()
@@ -694,8 +705,14 @@ class cointiger (huobipro):
 
     async def create_order(self, symbol, type, side, amount, price=None, params={}):
         await self.load_markets()
-        if not self.password:
-            raise AuthenticationError(self.id + ' createOrder requires exchange.password to be set to user trading password(not login passwordnot )')
+        #
+        # obsolete since v2
+        # https://github.com/ccxt/ccxt/issues/4815
+        #
+        #     if not self.password:
+        #         raise AuthenticationError(self.id + ' createOrder requires exchange.password to be set to user trading password(not login passwordnot )')
+        #     }
+        #
         self.check_required_credentials()
         market = self.market(symbol)
         orderType = 1 if (type == 'limit') else 2
@@ -704,7 +721,7 @@ class cointiger (huobipro):
             'side': side.upper(),
             'type': orderType,
             'volume': self.amount_to_precision(symbol, amount),
-            'capital_password': self.password,
+            # 'capital_password': self.password,  # obsolete since v2, https://github.com/ccxt/ccxt/issues/4815
         }
         if (type == 'market') and(side == 'buy'):
             if price is None:
@@ -717,14 +734,20 @@ class cointiger (huobipro):
                 order['price'] = self.price_to_precision(symbol, 0)
             else:
                 order['price'] = self.price_to_precision(symbol, price)
-        response = await self.privatePostOrder(self.extend(order, params))
+        response = await self.v2PostOrder(self.extend(order, params))
         #
-        #     {"order_id":34343}
+        #     {
+        #         "code": "0",
+        #         "msg": "suc",
+        #         "data": {
+        #             "order_id": 481
+        #         }
+        #     }
         #
         timestamp = self.milliseconds()
         return {
             'info': response,
-            'id': str(response['data']['order_id']),
+            'id': self.safe_string(response['data'], 'order_id'),
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
             'lastTradeTimestamp': None,
@@ -809,13 +832,12 @@ class cointiger (huobipro):
                 url += '?' + self.urlencode(params)
         return {'url': url, 'method': method, 'body': body, 'headers': headers}
 
-    def handle_errors(self, httpCode, reason, url, method, headers, body):
+    def handle_errors(self, httpCode, reason, url, method, headers, body, response):
         if not isinstance(body, basestring):
             return  # fallback to default error handler
         if len(body) < 2:
             return  # fallback to default error handler
         if (body[0] == '{') or (body[0] == '['):
-            response = json.loads(body)
             if 'code' in response:
                 #
                 #     {"code": "100005", "msg": "request sign illegal", "data": null}
@@ -839,6 +861,8 @@ class cointiger (huobipro):
                                     raise ExchangeError(feedback)
                                 elif message == 'api_keyNot EXIST':
                                     raise AuthenticationError(feedback)
+                                elif message == 'price precision exceed the limit':
+                                    raise InvalidOrder(feedback)
                                 elif message == 'Parameter error':
                                     raise BadRequest(feedback)
                             raise exceptions[code](feedback)

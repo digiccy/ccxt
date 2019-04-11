@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 const huobipro = require ('./huobipro.js');
-const { ExchangeError, ArgumentsRequired, BadRequest, ExchangeNotAvailable, AuthenticationError, InvalidOrder, InsufficientFunds, OrderNotFound } = require ('./base/errors');
+const { ExchangeError, ArgumentsRequired, BadRequest, ExchangeNotAvailable, AuthenticationError, InvalidOrder, InsufficientFunds, OrderNotFound, DDoSProtection } = require ('./base/errors');
 
 // ---------------------------------------------------------------------------
 
@@ -95,8 +95,8 @@ module.exports = class cointiger extends huobipro {
                 'trading': {
                     'tierBased': false,
                     'percentage': true,
-                    'maker': 0.001,
-                    'taker': 0.001,
+                    'maker': 0.0008,
+                    'taker': 0.0015,
                 },
             },
             'exceptions': {
@@ -112,6 +112,7 @@ module.exports = class cointiger extends huobipro {
                 '100002': ExchangeNotAvailable,
                 '100003': ExchangeError,
                 '100005': AuthenticationError,
+                '110030': DDoSProtection,
             },
             'commonCurrencies': {
                 'FGC': 'FoundGameCoin',
@@ -120,7 +121,7 @@ module.exports = class cointiger extends huobipro {
         });
     }
 
-    async fetchMarkets () {
+    async fetchMarkets (params = {}) {
         const response = await this.v2publicGetCurrencys ();
         //
         //     {
@@ -402,6 +403,17 @@ module.exports = class cointiger extends huobipro {
             'limit': limit,
         }, params));
         return this.parseTrades (response['data']['list'], market, since, limit);
+    }
+
+    parseOHLCV (ohlcv, market = undefined, timeframe = '1m', since = undefined, limit = undefined) {
+        return [
+            ohlcv['id'] * 1000,
+            ohlcv['open'],
+            ohlcv['high'],
+            ohlcv['low'],
+            ohlcv['close'],
+            ohlcv['vol'],
+        ];
     }
 
     async fetchOHLCV (symbol, timeframe = '1m', since = undefined, limit = 1000, params = {}) {
@@ -728,9 +740,14 @@ module.exports = class cointiger extends huobipro {
 
     async createOrder (symbol, type, side, amount, price = undefined, params = {}) {
         await this.loadMarkets ();
-        if (!this.password) {
-            throw new AuthenticationError (this.id + ' createOrder requires exchange.password to be set to user trading password (not login password!)');
-        }
+        //
+        // obsolete since v2
+        // https://github.com/ccxt/ccxt/issues/4815
+        //
+        //     if (!this.password) {
+        //         throw new AuthenticationError (this.id + ' createOrder requires exchange.password to be set to user trading password (not login password!)');
+        //     }
+        //
         this.checkRequiredCredentials ();
         let market = this.market (symbol);
         let orderType = (type === 'limit') ? 1 : 2;
@@ -739,7 +756,7 @@ module.exports = class cointiger extends huobipro {
             'side': side.toUpperCase (),
             'type': orderType,
             'volume': this.amountToPrecision (symbol, amount),
-            'capital_password': this.password,
+            // 'capital_password': this.password, // obsolete since v2, https://github.com/ccxt/ccxt/issues/4815
         };
         if ((type === 'market') && (side === 'buy')) {
             if (price === undefined) {
@@ -756,14 +773,20 @@ module.exports = class cointiger extends huobipro {
                 order['price'] = this.priceToPrecision (symbol, price);
             }
         }
-        let response = await this.privatePostOrder (this.extend (order, params));
+        let response = await this.v2PostOrder (this.extend (order, params));
         //
-        //     { "order_id":34343 }
+        //     {
+        //         "code": "0",
+        //         "msg": "suc",
+        //         "data": {
+        //             "order_id": 481
+        //         }
+        //     }
         //
-        let timestamp = this.milliseconds ();
+        const timestamp = this.milliseconds ();
         return {
             'info': response,
-            'id': response['data']['order_id'].toString (),
+            'id': this.safeString (response['data'], 'order_id'),
             'timestamp': timestamp,
             'datetime': this.iso8601 (timestamp),
             'lastTradeTimestamp': undefined,
@@ -855,13 +878,12 @@ module.exports = class cointiger extends huobipro {
         return { 'url': url, 'method': method, 'body': body, 'headers': headers };
     }
 
-    handleErrors (httpCode, reason, url, method, headers, body) {
+    handleErrors (httpCode, reason, url, method, headers, body, response) {
         if (typeof body !== 'string')
             return; // fallback to default error handler
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            let response = JSON.parse (body);
             if ('code' in response) {
                 //
                 //     { "code": "100005", "msg": "request sign illegal", "data": null }
@@ -886,6 +908,8 @@ module.exports = class cointiger extends huobipro {
                                     throw new ExchangeError (feedback);
                                 } else if (message === 'api_keyNot EXIST') {
                                     throw new AuthenticationError (feedback);
+                                } else if (message === 'price precision exceed the limit') {
+                                    throw new InvalidOrder (feedback);
                                 } else if (message === 'Parameter error') {
                                     throw new BadRequest (feedback);
                                 }

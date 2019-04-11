@@ -12,7 +12,9 @@ let [processPath, , exchangeId, methodName, ... params] = process.argv.filter (x
     , no_load_markets = process.argv.includes ('--no-load-markets')
     , details = process.argv.includes ('--details')
     , no_table = process.argv.includes ('--no-table')
+    , table = process.argv.includes ('--table')
     , iso8601 = process.argv.includes ('--iso8601')
+    , cors = process.argv.includes ('--cors')
 
 //-----------------------------------------------------------------------------
 
@@ -85,6 +87,16 @@ const cfscrapeCookies = (url) => {
 
 //-----------------------------------------------------------------------------
 
+// set up keys and settings, if any
+const keysGlobal = path.resolve ('keys.json')
+const keysLocal = path.resolve ('keys.local.json')
+
+let globalKeysFile = fs.existsSync (keysGlobal) ? keysGlobal : false
+let localKeysFile = fs.existsSync (keysLocal) ? keysLocal : globalKeysFile
+let settings = localKeysFile ? (require (localKeysFile)[exchangeId] || {}) : {}
+
+//-----------------------------------------------------------------------------
+
 const timeout = 30000
 let exchange = undefined
 const enableRateLimit = true
@@ -101,6 +113,7 @@ try {
         timeout,
         enableRateLimit,
         agent,
+        ... settings,
     })
 
 } catch (e) {
@@ -109,18 +122,6 @@ try {
     printUsage ()
     process.exit ()
 }
-
-//-----------------------------------------------------------------------------
-
-// set up keys and settings, if any
-const keysGlobal = path.resolve ('keys.json')
-const keysLocal = path.resolve ('keys.local.json')
-
-let globalKeysFile = fs.existsSync (keysGlobal) ? keysGlobal : false
-let localKeysFile = fs.existsSync (keysLocal) ? keysLocal : globalKeysFile
-let settings = localKeysFile ? (require (localKeysFile)[exchangeId] || {}) : {}
-
-Object.assign (exchange, settings)
 
 //-----------------------------------------------------------------------------
 
@@ -147,16 +148,19 @@ function printSupportedExchanges () {
     log ("--no-send         Print the request but don't actually send it to the exchange (sets verbose and load-markets)")
     log ('--no-load-markets Do not pre-load markets (for debugging)')
     log ('--details         Print detailed fetch responses')
-    log ('--no-table        Do not print tabulated fetch responses')
+    log ('--no-table        Do not print the fetch response as a table')
+    log ('--table           Print the fetch response as a table')
     log ('--iso8601         Print timestamps as ISO8601 datetimes')
+    log ('--cors            use CORS proxy for debugging')
 }
 
 //-----------------------------------------------------------------------------
 
 const printHumanReadable = (exchange, result) => {
 
-    if (Array.isArray (result)) {
+    if (Array.isArray (result) || table) {
 
+        result = Object.values (result)
         let arrayOfObjects = (typeof result[0] === 'object')
 
         if (details)
@@ -167,7 +171,7 @@ const printHumanReadable = (exchange, result) => {
             })
 
         if (!no_table)
-            if (arrayOfObjects) {
+            if (arrayOfObjects || table) {
                 log (result.length > 0 ? asTable (result.map (element => {
                     let keys = Object.keys (element)
                     delete element['info']
@@ -223,6 +227,11 @@ async function main () {
 
         if (cfscrape)
             exchange.headers = cfscrapeCookies (www)
+
+        if (cors) {
+            exchange.proxy =  'https://cors-anywhere.herokuapp.com/';
+            exchange.origin = exchange.uuid ()
+        }
 
         no_load_markets = no_send ? true : no_load_markets
 

@@ -16,7 +16,7 @@ class luno (Exchange):
             'id': 'luno',
             'name': 'luno',
             'countries': ['GB', 'SG', 'ZA'],
-            'rateLimit': 10000,
+            'rateLimit': 1000,
             'version': '1',
             'has': {
                 'CORS': False,
@@ -26,6 +26,7 @@ class luno (Exchange):
                 'fetchOpenOrders': True,
                 'fetchClosedOrders': True,
                 'fetchMyTrades': True,
+                'fetchTradingFee': True,
                 'fetchTradingFees': True,
             },
             'urls': {
@@ -84,7 +85,7 @@ class luno (Exchange):
             },
         })
 
-    def fetch_markets(self):
+    def fetch_markets(self, params={}):
         markets = self.publicGetTickers()
         result = []
         for p in range(0, len(markets['tickers'])):

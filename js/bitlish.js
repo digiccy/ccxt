@@ -122,7 +122,7 @@ module.exports = class bitlish extends Exchange {
         });
     }
 
-    async fetchMarkets () {
+    async fetchMarkets (params = {}) {
         let markets = await this.publicGetPairs ();
         let result = [];
         let keys = Object.keys (markets);
@@ -294,11 +294,11 @@ module.exports = class bitlish extends Exchange {
         return this.parseBalance (result);
     }
 
-    signIn () {
-        return this.privatePostSignin ({
+    async signIn (params = {}) {
+        return await this.privatePostSignin (this.extend ({
             'login': this.login,
             'passwd': this.password,
-        });
+        }, params));
     }
 
     async createOrder (symbol, type, side, amount, price = undefined, params = {}) {
@@ -322,10 +322,11 @@ module.exports = class bitlish extends Exchange {
         return await this.privatePostCancelTrade ({ 'id': id });
     }
 
-    async withdraw (currency, amount, address, tag = undefined, params = {}) {
+    async withdraw (code, amount, address, tag = undefined, params = {}) {
         this.checkAddress (address);
         await this.loadMarkets ();
-        if (currency !== 'BTC') {
+        let currency = this.currency (code);
+        if (code !== 'BTC') {
             // they did not document other types...
             throw new NotSupported (this.id + ' currently supports BTC withdrawals only, until they document other currencies...');
         }

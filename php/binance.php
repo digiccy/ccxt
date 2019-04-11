@@ -13,7 +13,7 @@ class binance extends Exchange {
         return array_replace_recursive (parent::describe (), array (
             'id' => 'binance',
             'name' => 'Binance',
-            'countries' => array ( 'JP' ), // Japan
+            'countries' => array ( 'JP', 'MT' ), // Japan, Malta
             'rateLimit' => 500,
             'certified' => true,
             // new metainfo interface
@@ -76,6 +76,7 @@ class binance extends Exchange {
                 'wapi' => array (
                     'post' => array (
                         'withdraw',
+                        'sub-account/transfer',
                     ),
                     'get' => array (
                         'depositHistory',
@@ -83,9 +84,13 @@ class binance extends Exchange {
                         'depositAddress',
                         'accountStatus',
                         'systemStatus',
+                        'apiTradingStatus',
                         'userAssetDribbletLog',
                         'tradeFee',
                         'assetDetail',
+                        'sub-account/list',
+                        'sub-account/transfer/history',
+                        'sub-account/assets',
                     ),
                 ),
                 'v3' => array (
@@ -96,10 +101,10 @@ class binance extends Exchange {
                 ),
                 'public' => array (
                     'get' => array (
-                        'exchangeInfo',
                         'ping',
                         'time',
                         'depth',
+                        'trades',
                         'aggTrades',
                         'klines',
                         'ticker/24hr',
@@ -256,11 +261,13 @@ class binance extends Exchange {
                 ),
             ),
             'commonCurrencies' => array (
+                'BCC' => 'BCC', // kept for backward-compatibility https://github.com/ccxt/ccxt/issues/4848
                 'YOYO' => 'YOYOW',
-                'BCC' => 'BCH',
             ),
             // exchange-specific options
             'options' => array (
+                'fetchTradesMethod' => 'publicGetAggTrades',
+                'fetchTickersMethod' => 'publicGetTicker24hr',
                 'defaultTimeInForce' => 'GTC', // 'GTC' = Good To Cancel (default), 'IOC' = Immediate Or Cancel
                 'defaultLimitOrderType' => 'limit', // or 'limit_maker'
                 'hasAlreadyAuthenticatedSuccessfully' => false,
@@ -269,9 +276,16 @@ class binance extends Exchange {
                 'timeDifference' => 0, // the difference between system clock and Binance clock
                 'adjustForTimeDifference' => false, // controls the adjustment logic upon instantiation
                 'parseOrderToPrecision' => false, // force amounts and costs in parseOrder to precision
-                'newOrderRespType' => 'RESULT', // 'ACK' for order id, 'RESULT' for full order or 'FULL' for order with fills
+                'newOrderRespType' => array (
+                    'market' => 'FULL', // 'ACK' for order id, 'RESULT' for full order or 'FULL' for order with fills
+                    'limit' => 'RESULT', // we change it from 'ACK' by default to 'RESULT'
+                ),
             ),
             'exceptions' => array (
+                'API key does not exist' => '\\ccxt\\AuthenticationError',
+                'Order would trigger immediately.' => '\\ccxt\\InvalidOrder',
+                'Account has insufficient balance for requested action.' => '\\ccxt\\InsufficientFunds',
+                'Rest API trading is not enabled.' => '\\ccxt\\ExchangeNotAvailable',
                 '-1000' => '\\ccxt\\ExchangeNotAvailable', // array ("code":-1000,"msg":"An unknown error occured while processing the request.")
                 '-1013' => '\\ccxt\\InvalidOrder', // createOrder -> 'invalid quantity'/'invalid price'/MIN_NOTIONAL
                 '-1021' => '\\ccxt\\InvalidNonce', // 'your time is ahead of server'
@@ -299,7 +313,7 @@ class binance extends Exchange {
         return $this->options['timeDifference'];
     }
 
-    public function fetch_markets () {
+    public function fetch_markets ($params = array ()) {
         $response = $this->publicGetExchangeInfo ();
         if ($this->options['adjustForTimeDifference'])
             $this->load_time_difference ();
@@ -308,7 +322,7 @@ class binance extends Exchange {
         for ($i = 0; $i < count ($markets); $i++) {
             $market = $markets[$i];
             $id = $market['symbol'];
-            // "123456" is a "test $symbol/$market"
+            // "123456" is a "test symbol/market"
             if ($id === '123456')
                 continue;
             $baseId = $market['baseAsset'];
@@ -340,7 +354,7 @@ class binance extends Exchange {
                         'max' => null,
                     ),
                     'price' => array (
-                        'min' => pow (10, -$precision['price']),
+                        'min' => null,
                         'max' => null,
                     ),
                     'cost' => array (
@@ -351,11 +365,19 @@ class binance extends Exchange {
             );
             if (is_array ($filters) && array_key_exists ('PRICE_FILTER', $filters)) {
                 $filter = $filters['PRICE_FILTER'];
-                $entry['precision']['price'] = $this->precision_from_string($filter['tickSize']);
+                // PRICE_FILTER reports zero values for $maxPrice
+                // since they updated $filter types in November 2018
+                // https://github.com/ccxt/ccxt/issues/4286
+                // therefore limits['price']['max'] doesn't have any meaningful value except null
                 $entry['limits']['price'] = array (
                     'min' => $this->safe_float($filter, 'minPrice'),
-                    'max' => $this->safe_float($filter, 'maxPrice'),
+                    'max' => null,
                 );
+                $maxPrice = $this->safe_float($filter, 'maxPrice');
+                if (($maxPrice !== null) && ($maxPrice > 0)) {
+                    $entry['limits']['price']['max'] = $maxPrice;
+                }
+                $entry['precision']['price'] = $this->precision_from_string($filter['tickSize']);
             }
             if (is_array ($filters) && array_key_exists ('LOT_SIZE', $filters)) {
                 $filter = $filters['LOT_SIZE'];
@@ -377,17 +399,20 @@ class binance extends Exchange {
         $market = $this->markets[$symbol];
         $key = 'quote';
         $rate = $market[$takerOrMaker];
-        $cost = floatval ($this->cost_to_precision($symbol, $amount * $rate));
+        $cost = $amount * $rate;
+        $precision = $market['precision']['price'];
         if ($side === 'sell') {
             $cost *= $price;
         } else {
             $key = 'base';
+            $precision = $market['precision']['amount'];
         }
+        $cost = $this->decimal_to_precision($cost, ROUND, $precision, $this->precisionMode);
         return array (
             'type' => $takerOrMaker,
             'currency' => $market[$key],
             'rate' => $rate,
-            'cost' => floatval ($this->fee_to_precision($symbol, $cost)),
+            'cost' => floatval ($cost),
         );
     }
 
@@ -428,13 +453,12 @@ class binance extends Exchange {
 
     public function parse_ticker ($ticker, $market = null) {
         $timestamp = $this->safe_integer($ticker, 'closeTime');
-        $iso8601 = ($timestamp === null) ? null : $this->iso8601 ($timestamp);
         $symbol = $this->find_symbol($this->safe_string($ticker, 'symbol'), $market);
         $last = $this->safe_float($ticker, 'lastPrice');
         return array (
             'symbol' => $symbol,
             'timestamp' => $timestamp,
-            'datetime' => $iso8601,
+            'datetime' => $this->iso8601 ($timestamp),
             'high' => $this->safe_float($ticker, 'highPrice'),
             'low' => $this->safe_float($ticker, 'lowPrice'),
             'bid' => $this->safe_float($ticker, 'bidPrice'),
@@ -480,7 +504,8 @@ class binance extends Exchange {
 
     public function fetch_tickers ($symbols = null, $params = array ()) {
         $this->load_markets();
-        $rawTickers = $this->publicGetTicker24hr ($params);
+        $method = $this->options['fetchTickersMethod'];
+        $rawTickers = $this->$method ($params);
         return $this->parse_tickers ($rawTickers, $symbols);
     }
 
@@ -513,20 +538,61 @@ class binance extends Exchange {
     }
 
     public function parse_trade ($trade, $market = null) {
-        $timestampField = (is_array ($trade) && array_key_exists ('T', $trade)) ? 'T' : 'time';
-        $timestamp = $this->safe_integer($trade, $timestampField);
-        $priceField = (is_array ($trade) && array_key_exists ('p', $trade)) ? 'p' : 'price';
-        $price = $this->safe_float($trade, $priceField);
-        $amountField = (is_array ($trade) && array_key_exists ('q', $trade)) ? 'q' : 'qty';
-        $amount = $this->safe_float($trade, $amountField);
-        $idField = (is_array ($trade) && array_key_exists ('a', $trade)) ? 'a' : 'id';
-        $id = $this->safe_string($trade, $idField);
+        //
+        // aggregate trades
+        // https://github.com/binance-exchange/binance-official-api-docs/blob/master/rest-api.md#compressedaggregate-trades-list
+        //
+        //     {
+        //         "a" => 26129,         // Aggregate tradeId
+        //         "p" => "0.01633102",  // Price
+        //         "q" => "4.70443515",  // Quantity
+        //         "f" => 27781,         // First tradeId
+        //         "l" => 27781,         // Last tradeId
+        //         "T" => 1498793709153, // Timestamp
+        //         "m" => true,          // Was the buyer the maker?
+        //         "M" => true           // Was the $trade the best $price match?
+        //     }
+        //
+        // recent public trades and old public trades
+        // https://github.com/binance-exchange/binance-official-api-docs/blob/master/rest-api.md#recent-trades-list
+        // https://github.com/binance-exchange/binance-official-api-docs/blob/master/rest-api.md#old-$trade-lookup-market_data
+        //
+        //     {
+        //         "$id" => 28457,
+        //         "$price" => "4.00000100",
+        //         "qty" => "12.00000000",
+        //         "time" => 1499865549590,
+        //         "isBuyerMaker" => true,
+        //         "isBestMatch" => true
+        //     }
+        //
+        // private trades
+        // https://github.com/binance-exchange/binance-official-api-docs/blob/master/rest-api.md#account-$trade-list-user_data
+        //
+        //     {
+        //         "$symbol" => "BNBBTC",
+        //         "$id" => 28457,
+        //         "orderId" => 100234,
+        //         "$price" => "4.00000100",
+        //         "qty" => "12.00000000",
+        //         "commission" => "10.10000000",
+        //         "commissionAsset" => "BNB",
+        //         "time" => 1499865549590,
+        //         "isBuyer" => true,
+        //         "isMaker" => false,
+        //         "isBestMatch" => true
+        //     }
+        //
+        $timestamp = $this->safe_integer_2($trade, 'T', 'time');
+        $price = $this->safe_float_2($trade, 'p', 'price');
+        $amount = $this->safe_float_2($trade, 'q', 'qty');
+        $id = $this->safe_string_2($trade, 'a', 'id');
         $side = null;
-        $order = null;
-        if (is_array ($trade) && array_key_exists ('orderId', $trade))
-            $order = $this->safe_string($trade, 'orderId');
+        $order = $this->safe_string($trade, 'orderId');
         if (is_array ($trade) && array_key_exists ('m', $trade)) {
             $side = $trade['m'] ? 'sell' : 'buy'; // this is reversed intentionally
+        } else if (is_array ($trade) && array_key_exists ('isBuyerMaker', $trade)) {
+            $side = $trade['isBuyerMaker'] ? 'sell' : 'buy';
         } else {
             if (is_array ($trade) && array_key_exists ('isBuyer', $trade))
                 $side = ($trade['isBuyer']) ? 'buy' : 'sell'; // this is a true $side
@@ -560,8 +626,8 @@ class binance extends Exchange {
             'takerOrMaker' => $takerOrMaker,
             'side' => $side,
             'price' => $price,
-            'cost' => $price * $amount,
             'amount' => $amount,
+            'cost' => $price * $amount,
             'fee' => $fee,
         );
     }
@@ -571,27 +637,60 @@ class binance extends Exchange {
         $market = $this->market ($symbol);
         $request = array (
             'symbol' => $market['id'],
+            // 'fromId' => 123,    // ID to get aggregate trades from INCLUSIVE.
+            // 'startTime' => 456, // Timestamp in ms to get aggregate trades from INCLUSIVE.
+            // 'endTime' => 789,   // Timestamp in ms to get aggregate trades until INCLUSIVE.
+            // 'limit' => 500,     // default = 500, maximum = 1000
         );
-        if ($since !== null) {
-            $request['startTime'] = $since;
-            $request['endTime'] = $this->sum ($since, 3600000);
+        if ($this->options['fetchTradesMethod'] === 'publicGetAggTrades') {
+            if ($since !== null) {
+                $request['startTime'] = $since;
+                $request['endTime'] = $this->sum ($since, 3600000);
+            }
         }
-        if ($limit !== null)
-            $request['limit'] = $limit;
-        // 'fromId' => 123,    // ID to get aggregate trades from INCLUSIVE.
-        // 'startTime' => 456, // Timestamp in ms to get aggregate trades from INCLUSIVE.
-        // 'endTime' => 789,   // Timestamp in ms to get aggregate trades until INCLUSIVE.
-        // 'limit' => 500,     // default = 500, maximum = 1000
+        if ($limit !== null) {
+            $request['limit'] = $limit; // default = 500, maximum = 1000
+        }
         //
         // Caveats:
         // - default $limit (500) applies only if no other parameters set, trades up
         //   to the maximum $limit may be returned to satisfy other parameters
         // - if both $limit and time window is set and time window contains more
         //   trades than the $limit then the last trades from the window are returned
-        // - 'tradeId' accepted and returned by this method is "aggregate" trade id
+        // - 'tradeId' accepted and returned by this $method is "aggregate" trade id
         //   which is different from actual trade id
         // - setting both fromId and time window results in error
-        $response = $this->publicGetAggTrades (array_merge ($request, $params));
+        $method = $this->safe_value($this->options, 'fetchTradesMethod', 'publicGetTrades');
+        $response = $this->$method (array_merge ($request, $params));
+        //
+        // aggregate trades
+        //
+        //     array (
+        //         {
+        //             "a" => 26129,         // Aggregate tradeId
+        //             "p" => "0.01633102",  // Price
+        //             "q" => "4.70443515",  // Quantity
+        //             "f" => 27781,         // First tradeId
+        //             "l" => 27781,         // Last tradeId
+        //             "T" => 1498793709153, // Timestamp
+        //             "m" => true,          // Was the buyer the maker?
+        //             "M" => true           // Was the trade the best price match?
+        //         }
+        //     )
+        //
+        // recent public trades and historical public trades
+        //
+        //     array (
+        //         {
+        //             "id" => 28457,
+        //             "price" => "4.00000100",
+        //             "qty" => "12.00000000",
+        //             "time" => 1499865549590,
+        //             "isBuyerMaker" => true,
+        //             "isBestMatch" => true
+        //         }
+        //     )
+        //
         return $this->parse_trades($response, $market, $since, $limit);
     }
 
@@ -601,6 +700,9 @@ class binance extends Exchange {
             'PARTIALLY_FILLED' => 'open',
             'FILLED' => 'closed',
             'CANCELED' => 'canceled',
+            'PENDING_CANCEL' => 'canceling', // currently unused
+            'REJECTED' => 'rejected',
+            'EXPIRED' => 'expired',
         );
         return (is_array ($statuses) && array_key_exists ($status, $statuses)) ? $statuses[$status] : $status;
     }
@@ -709,12 +811,13 @@ class binance extends Exchange {
             $params = $this->omit ($params, 'test');
         }
         $uppercaseType = strtoupper ($type);
+        $newOrderRespType = $this->safe_value($this->options['newOrderRespType'], $type, 'RESULT');
         $order = array (
             'symbol' => $market['id'],
             'quantity' => $this->amount_to_precision($symbol, $amount),
             'type' => $uppercaseType,
             'side' => strtoupper ($side),
-            'newOrderRespType' => $this->options['newOrderRespType'], // 'ACK' for $order id, 'RESULT' for full $order or 'FULL' for $order with fills
+            'newOrderRespType' => $newOrderRespType, // 'ACK' for $order id, 'RESULT' for full $order or 'FULL' for $order with fills
         );
         $timeInForceIsRequired = false;
         $priceIsRequired = false;
@@ -732,8 +835,9 @@ class binance extends Exchange {
             $priceIsRequired = true;
         }
         if ($priceIsRequired) {
-            if ($price === null)
+            if ($price === null) {
                 throw new InvalidOrder ($this->id . ' createOrder $method requires a $price argument for a ' . $type . ' order');
+            }
             $order['price'] = $this->price_to_precision($symbol, $price);
         }
         if ($timeInForceIsRequired) {
@@ -744,6 +848,7 @@ class binance extends Exchange {
             if ($stopPrice === null) {
                 throw new InvalidOrder ($this->id . ' createOrder $method requires a $stopPrice extra param for a ' . $type . ' order');
             } else {
+                $params = $this->omit ($params, 'stopPrice');
                 $order['stopPrice'] = $this->price_to_precision($symbol, $stopPrice);
             }
         }
@@ -776,8 +881,12 @@ class binance extends Exchange {
         $request = array (
             'symbol' => $market['id'],
         );
-        if ($limit !== null)
+        if ($since !== null) {
+            $request['startTime'] = $since;
+        }
+        if ($limit !== null) {
             $request['limit'] = $limit;
+        }
         $response = $this->privateGetAllOrders (array_merge ($request, $params));
         //
         //     array (
@@ -850,6 +959,23 @@ class binance extends Exchange {
         if ($limit !== null)
             $request['limit'] = $limit;
         $response = $this->privateGetMyTrades (array_merge ($request, $params));
+        //
+        //     array (
+        //         {
+        //             "$symbol" => "BNBBTC",
+        //             "id" => 28457,
+        //             "orderId" => 100234,
+        //             "price" => "4.00000100",
+        //             "qty" => "12.00000000",
+        //             "commission" => "10.10000000",
+        //             "commissionAsset" => "BNB",
+        //             "time" => 1499865549590,
+        //             "isBuyer" => true,
+        //             "isMaker" => false,
+        //             "isBestMatch" => true
+        //         }
+        //     )
+        //
         return $this->parse_trades($response, $market, $since, $limit);
     }
 
@@ -962,8 +1088,10 @@ class binance extends Exchange {
         $id = $this->safe_string($transaction, 'id');
         $address = $this->safe_string($transaction, 'address');
         $tag = $this->safe_string($transaction, 'addressTag'); // set but unused
-        if (strlen ($tag) < 1) {
-            $tag = null;
+        if ($tag !== null) {
+            if (strlen ($tag) < 1) {
+                $tag = null;
+            }
         }
         $txid = $this->safe_value($transaction, 'txId');
         $code = null;
@@ -1019,18 +1147,19 @@ class binance extends Exchange {
         $response = $this->wapiGetDepositAddress (array_merge (array (
             'asset' => $currency['id'],
         ), $params));
-        if (is_array ($response) && array_key_exists ('success', $response)) {
-            if ($response['success']) {
-                $address = $this->safe_string($response, 'address');
-                $tag = $this->safe_string($response, 'addressTag');
-                return array (
-                    'currency' => $code,
-                    'address' => $this->check_address($address),
-                    'tag' => $tag,
-                    'info' => $response,
-                );
-            }
+        $success = $this->safe_value($response, 'success');
+        if ($success === null || !$success) {
+            throw new InvalidAddress ($this->id . ' fetchDepositAddress returned an empty $response – create the deposit $address in the user settings first.');
         }
+        $address = $this->safe_string($response, 'address');
+        $tag = $this->safe_string($response, 'addressTag');
+        $this->check_address($address);
+        return array (
+            'currency' => $code,
+            'address' => $this->check_address($address),
+            'tag' => $tag,
+            'info' => $response,
+        );
     }
 
     public function fetch_funding_fees ($codes = null, $params = array ()) {
@@ -1126,7 +1255,7 @@ class binance extends Exchange {
         return array ( 'url' => $url, 'method' => $method, 'body' => $body, 'headers' => $headers );
     }
 
-    public function handle_errors ($code, $reason, $url, $method, $headers, $body) {
+    public function handle_errors ($code, $reason, $url, $method, $headers, $body, $response) {
         if (($code === 418) || ($code === 429))
             throw new DDoSProtection ($this->id . ' ' . (string) $code . ' ' . $reason . ' ' . $body);
         // $error $response in a form => array ( "$code" => -1013, "msg" => "Invalid quantity." )
@@ -1142,7 +1271,6 @@ class binance extends Exchange {
         }
         if (strlen ($body) > 0) {
             if ($body[0] === '{') {
-                $response = json_decode ($body, $as_associative_array = true);
                 // check $success value for wapi endpoints
                 // $response in format array ('msg' => 'The coin does not exist.', 'success' => true/false)
                 $success = $this->safe_value($response, 'success', true);
@@ -1161,24 +1289,21 @@ class binance extends Exchange {
                         }
                     }
                 }
+                $exceptions = $this->exceptions;
+                $message = $this->safe_string($response, 'msg');
+                if (is_array ($exceptions) && array_key_exists ($message, $exceptions)) {
+                    $ExceptionClass = $exceptions[$message];
+                    throw new $ExceptionClass ($this->id . ' ' . $message);
+                }
                 // checks against $error codes
                 $error = $this->safe_string($response, 'code');
                 if ($error !== null) {
-                    $exceptions = $this->exceptions;
                     if (is_array ($exceptions) && array_key_exists ($error, $exceptions)) {
                         // a workaround for array ("$code":-2015,"msg":"Invalid API-key, IP, or permissions for action.")
                         // despite that their $message is very confusing, it is raised by Binance
                         // on a temporary ban (the API key is valid, but disabled for a while)
                         if (($error === '-2015') && $this->options['hasAlreadyAuthenticatedSuccessfully']) {
                             throw new DDoSProtection ($this->id . ' temporary banned => ' . $body);
-                        }
-                        $message = $this->safe_string($response, 'msg');
-                        if ($message === 'Order would trigger immediately.') {
-                            throw new InvalidOrder ($this->id . ' ' . $body);
-                        } else if ($message === 'Account has insufficient balance for requested action.') {
-                            throw new InsufficientFunds ($this->id . ' ' . $body);
-                        } else if ($message === 'Rest API trading is not enabled.') {
-                            throw new ExchangeNotAvailable ($this->id . ' ' . $body);
                         }
                         throw new $exceptions[$error] ($this->id . ' ' . $body);
                     } else {

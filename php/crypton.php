@@ -70,7 +70,7 @@ class crypton extends Exchange {
         ));
     }
 
-    public function fetch_markets () {
+    public function fetch_markets ($params = array ()) {
         $response = $this->publicGetMarkets ();
         $markets = $response['result'];
         $result = array ();
@@ -178,7 +178,8 @@ class crypton extends Exchange {
 
     public function fetch_tickers ($symbols = null, $params = array ()) {
         $this->load_markets();
-        $tickers = $this->publicGetTickers ($params);
+        $response = $this->publicGetTickers ($params);
+        $tickers = $response['result'];
         $keys = is_array ($tickers) ? array_keys ($tickers) : array ();
         $result = array ();
         for ($i = 0; $i < count ($keys); $i++) {
@@ -400,9 +401,8 @@ class crypton extends Exchange {
         return array ( 'url' => $url, 'method' => $method, 'body' => $body, 'headers' => $headers );
     }
 
-    public function handle_errors ($code, $reason, $url, $method, $headers, $body) {
+    public function handle_errors ($code, $reason, $url, $method, $headers, $body, $response) {
         if ($body[0] === '{') {
-            $response = json_decode ($body, $as_associative_array = true);
             $success = $this->safe_value($response, 'success');
             if (!$success) {
                 throw new ExchangeError ($this->id . ' ' . $body);

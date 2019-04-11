@@ -79,6 +79,8 @@ module.exports = class bitbank extends Exchange {
                 'LTC/BTC': { 'id': 'ltc_btc', 'symbol': 'LTC/BTC', 'base': 'LTC', 'quote': 'BTC', 'baseId': 'ltc', 'quoteId': 'btc' },
                 'XRP/JPY': { 'id': 'xrp_jpy', 'symbol': 'XRP/JPY', 'base': 'XRP', 'quote': 'JPY', 'baseId': 'xrp', 'quoteId': 'jpy' },
                 'BTC/JPY': { 'id': 'btc_jpy', 'symbol': 'BTC/JPY', 'base': 'BTC', 'quote': 'JPY', 'baseId': 'btc', 'quoteId': 'jpy' },
+                'BCC/JPY': { 'id': 'bcc_jpy', 'symbol': 'BCC/JPY', 'base': 'BCC', 'quote': 'JPY', 'baseId': 'bcc', 'quoteId': 'jpy' },
+                'BCC/BTC': { 'id': 'bcc_btc', 'symbol': 'BCC/BTC', 'base': 'BCC', 'quote': 'BTC', 'baseId': 'bcc', 'quoteId': 'btc' },
             },
             'fees': {
                 'trading': {

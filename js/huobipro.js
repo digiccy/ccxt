@@ -19,9 +19,11 @@ module.exports = class huobipro extends Exchange {
             'accounts': undefined,
             'accountsById': undefined,
             'hostname': 'api.huobi.pro',
+            'futures': false,
             'has': {
                 'CORS': false,
                 'fetchTickers': true,
+                'futures': true,
                 'fetchDepositAddress': true,
                 'fetchOHLCV': true,
                 'fetchOrder': true,
@@ -51,11 +53,13 @@ module.exports = class huobipro extends Exchange {
                     'public': 'https://api.huobi.pro',
                     'private': 'https://api.huobi.pro',
                     'zendesk': 'https://huobiglobal.zendesk.com/hc/en-us/articles',
+                    'futures': 'https://api.hbdm.com/market'
                 },
                 'www': 'https://www.huobi.pro',
                 'referral': 'https://www.huobi.br.com/en-us/topic/invited/?invite_code=rwrd3',
                 'doc': 'https://github.com/huobiapi/API_Docs/wiki/REST_api_reference',
                 'fees': 'https://www.huobi.pro/about/fee/',
+                'futures': 'https://api.hbdm.com/market'
             },
             'api': {
                 'zendesk': {
@@ -148,6 +152,18 @@ module.exports = class huobipro extends Exchange {
                 'fetchBalanceMethod': 'privateGetAccountAccountsIdBalance',
                 'createOrderMethod': 'privatePostOrderOrdersPlace',
                 'language': 'en-US',
+                'fiats': [ 'USD', 'CNY' ],
+                'futures': {
+                    'BTC': true,
+                    'ETH': true,
+                },
+                'defaultContractType': 'this_week', // next_week, quarter
+                'contractTypes': ['this_week', 'next_week', 'quarter'],
+                'contractTypeSimple': {
+                    'this_week': 'CW',
+                    'next_week': 'NW',
+                    'quarter': 'CQ'
+                }
             },
             'commonCurrencies': {
                 'HOT': 'Hydro Protocol', // conflict with HOT (Holo) https://github.com/ccxt/ccxt/issues/4929
@@ -246,7 +262,7 @@ module.exports = class huobipro extends Exchange {
             };
             let maker = (base === 'OMG') ? 0 : 0.2 / 100;
             let taker = (base === 'OMG') ? 0 : 0.2 / 100;
-            result.push ({
+            const newMarket = {
                 'id': id,
                 'symbol': symbol,
                 'base': base,
@@ -272,7 +288,24 @@ module.exports = class huobipro extends Exchange {
                     },
                 },
                 'info': market,
-            });
+            }
+            result.push (newMarket);
+            if ((this.has['futures']) && (newMarket['base'] in this.options['futures'])) {
+                let fiats = this.options['fiats'];
+                for (let j = 0; j < fiats.length; j++) {
+                    const fiat = fiats[j];
+                    const lowercaseFiat = fiat.toLowerCase ();
+                    result.push (this.extend (newMarket, {
+                        'quote': fiat,
+                        'symbol': newMarket['base'] + '/' + fiat,
+                        'id': newMarket['base'].toLowerCase () + '_' + lowercaseFiat,
+                        'quoteId': lowercaseFiat,
+                        'type': 'future',
+                        'spot': false,
+                        'future': true,
+                    }));
+                }
+            }
         }
         return result;
     }
@@ -344,8 +377,12 @@ module.exports = class huobipro extends Exchange {
     async fetchOrderBook (symbol, limit = undefined, params = {}) {
         await this.loadMarkets ();
         let market = this.market (symbol);
+        let marketId = market['id'];
+        if (market['future']) {
+            marketId = market['base'] + '_' + this.options.contractTypeSimple[this.options['defaultContractType']];
+        }
         let response = await this.marketGetDepth (this.extend ({
-            'symbol': market['id'],
+            'symbol': marketId,
             'type': 'step0',
         }, params));
         if ('tick' in response) {
@@ -953,7 +990,7 @@ module.exports = class huobipro extends Exchange {
 
     sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
         let url = '/';
-        if (api === 'market') {
+        if (api === 'market' && !this.futures) {
             url += api;
         } else if ((api === 'public') || (api === 'private')) {
             url += this.version;
@@ -990,7 +1027,13 @@ module.exports = class huobipro extends Exchange {
             if (Object.keys (params).length)
                 url += '?' + this.urlencode (params);
         }
-        url = this.urls['api'][api] + url;
+        if (api === 'market' && this.futures) {
+            url = this.urls['api']['futures'] + url.slice(1);
+        }
+        else {
+            url = this.urls['api'][api] + url;
+        }
+        
         return { 'url': url, 'method': method, 'body': body, 'headers': headers };
     }
 
